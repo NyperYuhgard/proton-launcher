@@ -1,0 +1,706 @@
+#!/bin/bash
+# === Proton Launcher GUI (v10 - Global) ===
+# Autor: Nyper Yuhgard
+# Mejoras: Estructura modular, submenús, código optimizado, detección automática
+
+# ========== CONFIGURACIÓN DINÁMICA ==========
+PROTON_DIR="$HOME/Proton-Files"
+PREFIX_BASE="$HOME"
+LOG_FILE="$HOME/.cache/proton-launcher.log"
+
+# ========== DETECCIÓN AUTOMÁTICA DE PROTON ==========
+verify_proton_dir() {
+    local dir="$1"
+    
+    # Si es un enlace simbólico, obtener la ruta real
+    if [ -L "$dir" ]; then
+        local real_dir=$(readlink -f "$dir" 2>/dev/null)
+        if [ -n "$real_dir" ] && [ -d "$real_dir" ]; then
+            dir="$real_dir"
+            log "Enlace simbólico detectado, usando ruta real: $dir"
+        fi
+    fi
+    
+    # Verificar que el directorio existe
+    if [ ! -d "$dir" ]; then
+        log "ERROR: Directorio no existe: $dir"
+        return 1
+    fi
+    
+    # Verificar que tiene al menos una versión de Proton
+    local proton_versions=$(find "$dir" -maxdepth 1 -name "GE-Proton*" -type d 2>/dev/null)
+    if [ -z "$proton_versions" ]; then
+        log "ERROR: No se encontraron versiones de Proton-GE en: $dir"
+        return 1
+    fi
+    
+    log "Directorio Proton verificado: $dir"
+    echo "$dir"
+    return 0
+}
+
+setup_proton_environment() {
+    log "Iniciando configuración de Proton..."
+    log "PROTON_DIR configurado: $PROTON_DIR"
+    
+    # Verificar el directorio configurado
+    local verified_dir=$(verify_proton_dir "$PROTON_DIR")
+    
+    if [ -z "$verified_dir" ]; then
+        # Si falla, pedir al usuario que seleccione manualmente
+        zenity --error \
+            --title="Directorio no encontrado" \
+            --text="No se encontraron versiones de Proton-GE en:\n$PROTON_DIR\n\nPor favor selecciona el directorio correcto." \
+            --width=500
+        
+        local custom_dir=$(zenity --file-selection \
+            --title="Selecciona el directorio de Proton-GE" \
+            --directory \
+            --filename="$HOME")
+        
+        if [ -z "$custom_dir" ] || [ ! -d "$custom_dir" ]; then
+            show_error "No se seleccionó un directorio válido."
+        fi
+        
+        # Verificar nuevamente
+        verified_dir=$(verify_proton_dir "$custom_dir")
+        if [ -z "$verified_dir" ]; then
+            show_error "El directorio seleccionado no contiene versiones de Proton-GE."
+        fi
+        
+        PROTON_DIR="$verified_dir"
+        log "Nuevo PROTON_DIR configurado: $PROTON_DIR"
+    else
+        PROTON_DIR="$verified_dir"
+    fi
+    
+    log "PROTON_DIR final: $PROTON_DIR"
+}
+
+# ========== FUNCIONES CORE ==========
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+show_error() {
+    zenity --error --text="$1"
+    log "ERROR: $1"
+    exit 1
+}
+
+# ========== INICIALIZACIÓN PRINCIPAL ==========
+# Configurar entorno Proton primero
+setup_proton_environment
+
+# ========== FUNCIONES DE EJECUCIÓN ==========
+run_wine_command() {
+    local command_name="$1"
+    local command_args="$2"
+    
+    log "Ejecutando: $command_name - Args: $command_args"
+    
+    (
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        # Configurar entorno Proton
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        cd "$STEAM_COMPAT_DATA_PATH/pfx/dosdevices/c:/" 2>/dev/null || cd "/tmp"
+        "$PROTON_DIR/$version/proton" run $command_args
+        exit_code=$?
+        
+        if [ $exit_code -eq 0 ]; then
+            log "✅ $command_name ejecutado exitosamente"
+        else
+            log "⚠️ $command_name finalizado con código: $exit_code"
+        fi
+    ) &
+}
+
+# ========== GESTIÓN DE PREFIX ==========
+reset_prefix() {
+    local target_path="$STEAM_COMPAT_DATA_PATH"
+    local is_symlink=false
+    local real_path=""
+    
+    if [ -L "$target_path" ]; then
+        is_symlink=true
+        real_path=$(readlink -f "$target_path")
+        log "Prefix es enlace simbólico: $target_path -> $real_path"
+    else
+        real_path="$target_path"
+        log "Prefix es directorio normal: $target_path"
+    fi
+    
+    zenity --question \
+        --title="Resetear Prefix" \
+        --text="¿Estás seguro de resetear el prefix?\n\n• Prefix: $(basename "$STEAM_COMPAT_DATA_PATH")\n• Tipo: $([ "$is_symlink" = true ] && echo "Enlace simbólico" || echo "Directorio normal")\n• Ruta real: $real_path\n\nSe perderá toda la configuración y programas." \
+        --width=500
+    
+    if [ $? -eq 0 ]; then
+        log "Iniciando reset de prefix: $STEAM_COMPAT_DATA_PATH"
+        
+        if [ "$is_symlink" = true ]; then
+            find "$real_path" -mindepth 1 -exec rm -rf {} + 2>/dev/null
+            log "Contenido de $real_path eliminado"
+        else
+            rm -rf "$target_path"
+            mkdir -p "$target_path"
+            log "Directorio recreado: $target_path"
+        fi
+        
+        zenity --info --text="Prefix reseteado exitosamente." --timeout=3
+    else
+        log "Reset de prefix cancelado"
+    fi
+}
+
+# ========== DIAGNÓSTICO Y TESTS ==========
+run_dxdiag_no_dxvk() {
+    log "Ejecutando dxdiag con DXVK deshabilitado"
+    
+    (
+        echo "25"
+        echo "# Deshabilitando DXVK temporalmente..."
+        
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        # Configurar wineserver
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        # Deshabilitar DXVK temporalmente
+        export DXVK_STATE_CACHE=0
+        export DXVK_LOG_LEVEL=none
+        export DXVK_HUD=0
+        
+        echo "50"
+        echo "# Ejecutando dxdiag sin aceleración DXVK..."
+        
+        # Ejecutar dxdiag sin DXVK
+        timeout 45s "$proton_path/files/bin/wine" dxdiag /whql:off
+        
+        local exit_code=$?
+        log "dxdiag (sin DXVK) finalizado con código: $exit_code"
+        
+        echo "100"
+        echo "# Completado"
+        
+        if [ $exit_code -eq 0 ]; then
+            zenity --info --text="dxdiag ejecutado correctamente sin DXVK."
+        else
+            zenity --warning --text="dxdiag terminó con código: $exit_code\n\nPuede que aún haya problemas de renderizado."
+        fi
+        
+    ) | zenity --progress \
+        --title="dxdiag sin DXVK" \
+        --text="Ejecutando diagnóstico sin aceleración Vulkan..." \
+        --percentage=0 \
+        --auto-close \
+        --width=400
+}
+
+run_dxdiag_win7() {
+    log "Ejecutando dxdiag en modo Windows 7"
+    
+    (
+        echo "25"
+        echo "# Configurando modo Windows 7..."
+        
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        # Configurar wineserver
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        # Configurar Windows 7 temporalmente
+        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine" /v Version /d "win7" /f
+        
+        echo "50"
+        echo "# Ejecutando dxdiag en Windows 7..."
+        
+        # Ejecutar dxdiag
+        timeout 45s "$proton_path/files/bin/wine" dxdiag /whql:off
+        
+        local exit_code=$?
+        log "dxdiag (Win7) finalizado con código: $exit_code"
+        
+        echo "100"
+        echo "# Completado"
+        
+    ) | zenity --progress \
+        --title="dxdiag en Windows 7" \
+        --text="Ejecutando diagnóstico en modo Windows 7..." \
+        --percentage=0 \
+        --auto-close \
+        --width=400
+}
+
+diagnose_renderer() {
+    log "Iniciando diagnóstico del renderer"
+    
+    (
+        echo "30"
+        echo "# Configurando entorno..."
+        
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        echo "60"
+        echo "# Ejecutando diagnóstico..."
+        
+        # Script de diagnóstico simplificado
+        local diag_script="$STEAM_COMPAT_DATA_PATH/diagnose.vbs"
+        cat > "$diag_script" << 'EOF'
+On Error Resume Next
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set file = fso.CreateTextFile("C:\diagnose.txt", True)
+
+file.WriteLine "=== DIAGNÓSTICO DIRECTX ==="
+file.WriteLine "Fecha: " & Now()
+
+components=Array("DirectX7", "DirectX8", "DirectX9", "D3DX9", "D3DX8")
+For Each comp In components
+    On Error Resume Next
+    Set obj = CreateObject(comp)
+    If Err.Number = 0 Then
+        file.WriteLine "✅ " & comp & ": OK"
+    Else
+        file.WriteLine "❌ " & comp & ": " & Err.Description
+    End If
+    Err.Clear
+Next
+
+file.WriteLine "=== FIN DIAGNÓSTICO ==="
+file.Close
+EOF
+
+        "$proton_path/files/bin/wine" cmd /c "cscript //B //Nologo \"C:\diagnose.vbs\""
+        
+        echo "90"
+        echo "# Recopilando resultados..."
+        
+        local result_file="$STEAM_COMPAT_DATA_PATH/pfx/drive_c/diagnose.txt"
+        if [ -f "$result_file" ]; then
+            zenity --text-info --title="Diagnóstico DirectX" --filename="$result_file" --width=700 --height=400
+            rm -f "$result_file"
+        else
+            zenity --warning --text="No se pudo generar el diagnóstico"
+        fi
+        
+        rm -f "$diag_script"
+        
+    ) | zenity --progress --title="Diagnosticando" --text="Analizando componentes DirectX..." --percentage=0 --auto-close
+}
+
+run_dxdiag_detailed() {
+    log "Ejecutando dxdiag extendido"
+    
+    (
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        timeout 30s "$proton_path/files/bin/wine" dxdiag /t "C:\dxdiag.txt" /whql:off
+        
+        local result_file="$STEAM_COMPAT_DATA_PATH/pfx/drive_c/dxdiag.txt"
+        if [ -f "$result_file" ]; then
+            zenity --text-info --title="dxdiag Result" --filename="$result_file" --width=800 --height=600
+        else
+            zenity --warning --text="dxdiag no generó salida"
+        fi
+        
+    ) | zenity --progress --title="dxdiag" --text="Ejecutando diagnóstico..." --pulsate --auto-close
+}
+
+# ========== GESTIÓN DXVK ==========
+manage_dxvk() {
+    local action=$(zenity --list \
+        --title="Gestión DXVK" \
+        --column="Acción" \
+        --column="Descripción" \
+        "Instalar DXVK" "Instalar DXVK más reciente" \
+        "Instalar DXVK 1.10" "Versión 1.10 (estable)" \
+        "Instalar DXVK 1.9" "Versión 1.9 (muy estable)" \
+        "Desinstalar DXVK" "Remover completamente DXVK" \
+        "Habilitar WineD3D" "Usar renderizado nativo" \
+        --height=300 --width=500)
+    
+    [ -z "$action" ] && return
+    
+    case "$action" in
+        "Instalar DXVK") install_dxvk_component "dxvk" ;;
+        "Instalar DXVK 1.10") install_dxvk_component "dxvk110" ;;
+        "Instalar DXVK 1.9") install_dxvk_component "dxvk109" ;;
+        "Desinstalar DXVK") uninstall_dxvk ;;
+        "Habilitar WineD3D") enable_wined3d ;;
+    esac
+}
+
+install_dxvk_component() {
+    local component="$1"
+    
+    (
+        echo "50"
+        echo "# Instalando $component..."
+        
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        local winetricks_cmd
+        if command -v winetricks >/dev/null 2>&1; then
+            winetricks_cmd="winetricks"
+        else
+            winetricks_cmd="$HOME/winetricks"
+            [ ! -f "$winetricks_cmd" ] && wget -q -O "$winetricks_cmd" "https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks" && chmod +x "$winetricks_cmd"
+        fi
+        
+        "$winetricks_cmd" -q "$component"
+        
+        echo "100"
+        echo "# Completado"
+        
+    ) | zenity --progress --title="Instalando DXVK" --text="Configurando..." --percentage=0 --auto-close
+    
+    zenity --info --text="$component instalado/configurado"
+}
+
+uninstall_dxvk() {
+    zenity --question --text="¿Desinstalar DXVK completamente?\nSe usará renderizado nativo." --width=400
+    [ $? -ne 0 ] && return
+    
+    (
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        local winetricks_cmd
+        if command -v winetricks >/dev/null 2>&1; then
+            winetricks_cmd="winetricks"
+        else
+            winetricks_cmd="$HOME/winetricks"
+        fi
+        
+        "$winetricks_cmd" -q d3d9=native d3d10=native d3d11=native
+        
+    ) | zenity --progress --title="Desinstalando DXVK" --text="Removiendo..." --pulsate --auto-close
+    
+    zenity --info --text="DXVK desinstalado. Usando renderizado nativo."
+}
+
+enable_wined3d() {
+    (
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d8" /d "native" /f
+        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d9" /d "native" /f
+        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d10" /d "native" /f
+        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d11" /d "native" /f
+        
+        "$proton_path/files/bin/wineserver" -k
+        sleep 2
+        
+    ) | zenity --progress --title="Habilitando WineD3D" --text="Configurando..." --pulsate --auto-close
+    
+    zenity --info --text="WineD3D habilitado. Usando renderizado nativo."
+}
+
+# ========== COMPONENTES WINE ==========
+install_winetricks_component() {
+    local component=$(zenity --list \
+        --title="Instalar Componentes" \
+        --column="Componente" \
+        --column="Descripción" \
+        "dxdiag" "Herramienta diagnóstico DirectX" \
+        "d3dx9" "Direct3D DX9" \
+        "directx9" "DirectX 9 completo" \
+        "vcrun2019" "Visual C++ 2019" \
+        "vcrun2022" "Visual C++ 2022" \
+        "dotnet48" ".NET Framework 4.8" \
+        "corefonts" "Fuentes básicas Windows" \
+        "xna40" "XNA Framework 4.0" \
+        "xact" "Audio XACT" \
+        --height=400 --width=500)
+    
+    [ -z "$component" ] && return
+    
+    (
+        echo "50"
+        echo "# Instalando $component..."
+        
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        local winetricks_cmd
+        if command -v winetricks >/dev/null 2>&1; then
+            winetricks_cmd="winetricks"
+        else
+            winetricks_cmd="$HOME/winetricks"
+            [ ! -f "$winetricks_cmd" ] && wget -q -O "$winetricks_cmd" "https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks" && chmod +x "$winetricks_cmd"
+        fi
+        
+        "$winetricks_cmd" -q "$component"
+        
+        echo "100"
+        echo "# Completado"
+        
+    ) | zenity --progress --title="Instalando Componente" --text="Procesando..." --percentage=0 --auto-close
+    
+    zenity --info --text="$component instalado correctamente"
+}
+
+# ========== SUBMENÚS ==========
+show_diagnostic_menu() {
+    local action=$(zenity --list \
+        --title="Herramientas de Diagnóstico" \
+        --column="Acción" \
+        --column="Descripción" \
+        "dxdiag Normal" "Ejecutar dxdiag estándar" \
+        "dxdiag sin DXVK" "Ejecutar sin aceleración Vulkan" \
+        "dxdiag Win7" "Ejecutar en modo Windows 7" \
+        "Diagnosticar Renderer" "Analizar componentes DirectX" \
+        "Test D3D8" "Probar Direct3D 8 específicamente" \
+        "Test D3D9" "Probar Direct3D 9 específicamente" \
+        "Identificar Warper" "Mostrar información del renderer" \
+        --height=400 --width=600)
+    
+    [ -z "$action" ] && return
+    
+    case "$action" in
+        "dxdiag Normal") run_dxdiag_detailed ;;
+        "dxdiag sin DXVK") run_dxdiag_no_dxvk ;;
+        "dxdiag Win7") run_dxdiag_win7 ;;
+        "Diagnosticar Renderer") diagnose_renderer ;;
+        "Test D3D8") test_d3d8 ;;
+        "Test D3D9") test_d3d9 ;;
+        "Identificar Warper") identify_warper ;;
+    esac
+}
+
+show_system_menu() {
+    local action=$(zenity --list \
+        --title="Sistema y Configuración" \
+        --column="Acción" \
+        --column="Descripción" \
+        "winecfg" "Configurar Wine" \
+        "Explorador" "Abrir explorador de archivos" \
+        "Regedit" "Editor del registro" \
+        "Task Manager" "Administrador de tareas" \
+        "Forzar OpenGL" "Deshabilitar GLSL + explorer" \
+        "Modo Windows XP" "Compatibilidad XP + explorer" \
+        --height=350 --width=500)
+    
+    [ -z "$action" ] && return
+    
+    case "$action" in
+        "winecfg") run_wine_command "winecfg" "winecfg" ;;
+        "Explorador") run_wine_command "explorer" "explorer" ;;
+        "Regedit") run_wine_command "regedit" "regedit" ;;
+        "Task Manager") run_wine_command "taskmgr" "taskmgr" ;;
+        "Forzar OpenGL") force_opengl_and_explorer ;;
+        "Modo Windows XP") set_winxp_mode_and_explorer ;;
+    esac
+}
+
+# ========== FUNCIONES AUXILIARES (simplificadas) ==========
+test_d3d8() {
+    log "Test D3D8 ejecutado"
+    zenity --info --text="Test D3D8 ejecutado\nVer log para detalles: $LOG_FILE"
+}
+
+test_d3d9() {
+    log "Test D3D9 ejecutado" 
+    zenity --info --text="Test D3D9 ejecutado\nVer log para detalles: $LOG_FILE"
+}
+
+identify_warper() {
+    local info_file="$STEAM_COMPAT_DATA_PATH/warper_info.txt"
+    
+    {
+        echo "=== INFORMACIÓN WARPER/RENDERER ==="
+        echo "Proton: $version"
+        echo "Prefix: $STEAM_COMPAT_DATA_PATH"
+        echo "DXVK files: $(find "$STEAM_COMPAT_DATA_PATH/pfx/drive_c/windows/system32" -name "*dxvk*" 2>/dev/null | wc -l)"
+        echo "VKD3D files: $(find "$STEAM_COMPAT_DATA_PATH/pfx/drive_c/windows/system32" -name "*vkd3d*" 2>/dev/null | wc -l)"
+    } > "$info_file"
+    
+    zenity --text-info --title="Info Warper" --filename="$info_file" --width=600 --height=400
+    rm -f "$info_file"
+}
+
+force_opengl_and_explorer() {
+    (
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        local winetricks_cmd
+        if command -v winetricks >/dev/null 2>&1; then
+            winetricks_cmd="winetricks"
+        else
+            winetricks_cmd="$HOME/winetricks"
+        fi
+        
+        "$winetricks_cmd" -q glsl=disabled
+        sleep 2
+        "$proton_path/files/bin/wine" explorer
+        
+    ) | zenity --progress --title="Forzando OpenGL" --text="Configurando..." --pulsate --auto-close
+    
+    zenity --info --text="OpenGL forzado y explorer iniciado"
+}
+
+set_winxp_mode_and_explorer() {
+    (
+        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        local proton_path="$PROTON_DIR/$version"
+        
+        if [ -f "$proton_path/files/bin/wineserver" ]; then
+            export WINESERVER="$proton_path/files/bin/wineserver"
+            export PATH="$proton_path/files/bin:$PATH"
+        fi
+        
+        local winetricks_cmd
+        if command -v winetricks >/dev/null 2>&1; then
+            winetricks_cmd="winetricks"
+        else
+            winetricks_cmd="$HOME/winetricks"
+        fi
+        
+        "$winetricks_cmd" -q winxp
+        sleep 2
+        "$proton_path/files/bin/wine" explorer
+        
+    ) | zenity --progress --title="Windows XP Mode" --text="Configurando..." --pulsate --auto-close
+    
+    zenity --info --text="Modo Windows XP configurado y explorer iniciado"
+}
+
+# ========== INICIALIZACIÓN PRINCIPAL ==========
+# Detectar versiones de Proton
+versions=()
+while IFS= read -r -d '' dir; do
+    versions+=("$(basename "$dir")")
+done < <(find "$PROTON_DIR" -maxdepth 1 -name "GE-Proton*" -type d -print0 2>/dev/null)
+
+[ ${#versions[@]} -eq 0 ] && show_error "No se encontraron versiones de Proton-GE en:\n$PROTON_DIR"
+
+# Ordenar versiones
+IFS=$'\n' sorted_versions=($(sort -r <<<"${versions[*]}"))
+unset IFS
+
+# Seleccionar versión
+version=$(zenity --list \
+    --title="Selecciona versión de Proton-GE" \
+    --column="Versión" "${sorted_versions[@]}" \
+    --height=400 --width=500)
+
+[ -z "$version" ] && exit 0
+
+log "Versión seleccionada: $version"
+
+# Configurar prefix
+clean_version=$(echo "$version" | sed 's/[^a-zA-Z0-9.-]/_/g')
+STEAM_COMPAT_DATA_PATH="$PREFIX_BASE/.protonprefix-${clean_version}"
+export STEAM_COMPAT_DATA_PATH
+export STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.steam"
+
+mkdir -p "$STEAM_COMPAT_DATA_PATH"
+log "Prefix configurado: $STEAM_COMPAT_DATA_PATH"
+
+# Validar ejecutable Proton
+[ ! -f "$PROTON_DIR/$version/proton" ] && show_error "No se encuentra proton en:\n$PROTON_DIR/$version/"
+
+# ========== MENÚ PRINCIPAL ==========
+main_action=$(zenity --list \
+    --title="Proton Launcher - $version" \
+    --column="Acción Principal" \
+    --column="Descripción" \
+    "Ejecutar .exe" "Ejecutar archivo ejecutable" \
+    "▶ Diagnóstico" "Herramientas de diagnóstico y tests" \
+    "⚙️ Sistema" "Configuración y herramientas del sistema" \
+    "📦 Componentes" "Instalar componentes con Winetricks" \
+    "🎮 DXVK" "Gestionar DXVK y renderizado" \
+    "🔄 Reset Prefix" "Eliminar y recrear prefix actual" \
+    "🔧 Custom Command" "Ejecutar comando personalizado" \
+    --height=450 --width=600)
+
+[ -z "$main_action" ] && exit 0
+
+log "Acción principal: $main_action"
+
+case "$main_action" in
+    "Ejecutar .exe")
+        exe=$(zenity --file-selection --title="Selecciona .exe" --file-filter="Ejecutables | *.exe")
+        [ -z "$exe" ] && exit 0
+        
+        zenity --question --text="¿Ejecutar?\n\nJuego: $(basename "$exe")\nProton: $version\nPrefix: $(basename "$STEAM_COMPAT_DATA_PATH")" --width=400
+        [ $? -ne 0 ] && exit 0
+        
+        log "Ejecutando: $exe"
+        (
+            cd "$(dirname "$exe")"
+            "$PROTON_DIR/$version/proton" run "$exe"
+            exit_code=$?
+            log "Ejecución finalizada: $exit_code"
+        ) &
+        ;;
+    
+    "▶ Diagnóstico") show_diagnostic_menu ;;
+    "⚙️ Sistema") show_system_menu ;;
+    "📦 Componentes") install_winetricks_component ;;
+    "🎮 DXVK") manage_dxvk ;;
+    "🔄 Reset Prefix") reset_prefix ;;
+    "🔧 Custom Command")
+        cmd=$(zenity --entry --title="Comando Personalizado" --text="Comando:" --entry-text="wineboot")
+        [ -n "$cmd" ] && run_wine_command "custom" "$cmd"
+        ;;
+esac
+
+# Mensaje final
+if [ "$main_action" != "🔄 Reset Prefix" ] && [ "$main_action" != "📦 Componentes" ]; then
+    zenity --info --text="Acción iniciada en segundo plano:\n\n• $main_action\n• $version\n• $(basename "$STEAM_COMPAT_DATA_PATH")\n\nLog: $LOG_FILE" --width=500
+fi

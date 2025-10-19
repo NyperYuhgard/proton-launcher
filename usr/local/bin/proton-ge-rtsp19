@@ -1,0 +1,6 @@
+#!/bin/bash
+# Proton GE RTSP19 separado del prefijo principal
+export STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.steam"
+export STEAM_COMPAT_DATA_PATH="$HOME/.protonprefix-rtsp19"
+
+"/mnt/wwn-0x5000c500c971cdbb-part1/LinuxInstalls/GE-Proton10-20-rtsp19/proton" run "$@"
