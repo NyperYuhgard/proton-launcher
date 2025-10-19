@@ -145,7 +145,7 @@ verify_installation() {
         if command -v "$tool" >/dev/null 2>&1; then
             print_status "✓ $tool instalado en /usr/local/bin"
         else
-            print_warning "⚠ $tool no instalado (opcional)"
+            print_warning "⚠ $tool no instalado (opcional) en desuso"
         fi
     done
     
@@ -186,7 +186,7 @@ main() {
     check_root
     check_dependencies
     install_main_app
-    install_optional_tools
+  #  install_optional_tools (Now Unused)
     create_user_dirs
     verify_installation
 }

@@ -1,6 +1,0 @@
-#!/bin/bash
-# Proton GE como reemplazo de Wine (sin Steam)
-export STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.steam"
-export STEAM_COMPAT_DATA_PATH="${WINEPREFIX:-$HOME/.protonprefix}"
-
-"/mnt/wwn-0x5000c500c971cdbb-part1/LinuxInstalls/GE-Proton10-20/proton" run "$@"

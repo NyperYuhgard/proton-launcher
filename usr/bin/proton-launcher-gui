@@ -332,111 +332,55 @@ run_dxdiag_detailed() {
     ) | zenity --progress --title="dxdiag" --text="Ejecutando diagnóstico..." --pulsate --auto-close
 }
 
-# ========== GESTIÓN DXVK ==========
-manage_dxvk() {
-    local action=$(zenity --list \
-        --title="Gestión DXVK" \
-        --column="Acción" \
-        --column="Descripción" \
-        "Instalar DXVK" "Instalar DXVK más reciente" \
-        "Instalar DXVK 1.10" "Versión 1.10 (estable)" \
-        "Instalar DXVK 1.9" "Versión 1.9 (muy estable)" \
-        "Desinstalar DXVK" "Remover completamente DXVK" \
-        "Habilitar WineD3D" "Usar renderizado nativo" \
-        --height=300 --width=500)
+# ========== EJECUCIÓN CON WINED3D ==========
+run_exe_with_wined3d() {
+    log "Solicitando ejecutable para WineD3D"
     
-    [ -z "$action" ] && return
+    exe=$(zenity --file-selection --title="Selecciona .exe para ejecutar con WineD3D" --file-filter="Ejecutables | *.exe")
+    [ -z "$exe" ] && return
     
-    case "$action" in
-        "Instalar DXVK") install_dxvk_component "dxvk" ;;
-        "Instalar DXVK 1.10") install_dxvk_component "dxvk110" ;;
-        "Instalar DXVK 1.9") install_dxvk_component "dxvk109" ;;
-        "Desinstalar DXVK") uninstall_dxvk ;;
-        "Habilitar WineD3D") enable_wined3d ;;
-    esac
-}
-
-install_dxvk_component() {
-    local component="$1"
-    
-    (
-        echo "50"
-        echo "# Instalando $component..."
-        
-        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
-        local proton_path="$PROTON_DIR/$version"
-        
-        if [ -f "$proton_path/files/bin/wineserver" ]; then
-            export WINESERVER="$proton_path/files/bin/wineserver"
-            export PATH="$proton_path/files/bin:$PATH"
-        fi
-        
-        local winetricks_cmd
-        if command -v winetricks >/dev/null 2>&1; then
-            winetricks_cmd="winetricks"
-        else
-            winetricks_cmd="$HOME/winetricks"
-            [ ! -f "$winetricks_cmd" ] && wget -q -O "$winetricks_cmd" "https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks" && chmod +x "$winetricks_cmd"
-        fi
-        
-        "$winetricks_cmd" -q "$component"
-        
-        echo "100"
-        echo "# Completado"
-        
-    ) | zenity --progress --title="Instalando DXVK" --text="Configurando..." --percentage=0 --auto-close
-    
-    zenity --info --text="$component instalado/configurado"
-}
-
-uninstall_dxvk() {
-    zenity --question --text="¿Desinstalar DXVK completamente?\nSe usará renderizado nativo." --width=400
+    zenity --question --text="¿Ejecutar con WineD3D (sin DXVK)?\n\nJuego: $(basename "$exe")\nProton: $version\nRender: WineD3D (OpenGL)\nPrefix: $(basename "$STEAM_COMPAT_DATA_PATH")" --width=500
     [ $? -ne 0 ] && return
     
+    log "Ejecutando con WineD3D: $exe"
+    
     (
+        # Configurar entorno para WineD3D
         export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
+        export PROTON_USE_WINED3D=1
+        export DXVK_STATE_CACHE=0
+        export DXVK_LOG_LEVEL=none
+        export DXVK_HUD=0
+        
         local proton_path="$PROTON_DIR/$version"
         
+        # Configurar wineserver
         if [ -f "$proton_path/files/bin/wineserver" ]; then
             export WINESERVER="$proton_path/files/bin/wineserver"
             export PATH="$proton_path/files/bin:$PATH"
         fi
         
-        local winetricks_cmd
-        if command -v winetricks >/dev/null 2>&1; then
-            winetricks_cmd="winetricks"
+        # Forzar WineD3D en el registro
+        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d8" /d "native" /f >/dev/null 2>&1
+        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d9" /d "native" /f >/dev/null 2>&1
+        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d10" /d "native" /f >/dev/null 2>&1
+        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d11" /d "native" /f >/dev/null 2>&1
+        
+        log "Configuración WineD3D aplicada, ejecutando: $exe"
+        
+        cd "$(dirname "$exe")"
+        "$PROTON_DIR/$version/proton" run "$exe"
+        exit_code=$?
+        
+        log "Ejecución WineD3D finalizada: $exit_code"
+        
+        # Notificar resultado
+        if [ $exit_code -eq 0 ]; then
+            notify-send -i dialog-information "Proton Launcher" "✅ Ejecución con WineD3D completada"
         else
-            winetricks_cmd="$HOME/winetricks"
+            notify-send -i dialog-warning "Proton Launcher" "⚠️ Ejecución WineD3D terminó con código: $exit_code"
         fi
-        
-        "$winetricks_cmd" -q d3d9=native d3d10=native d3d11=native
-        
-    ) | zenity --progress --title="Desinstalando DXVK" --text="Removiendo..." --pulsate --auto-close
-    
-    zenity --info --text="DXVK desinstalado. Usando renderizado nativo."
-}
-
-enable_wined3d() {
-    (
-        export WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx"
-        local proton_path="$PROTON_DIR/$version"
-        
-        if [ -f "$proton_path/files/bin/wineserver" ]; then
-            export WINESERVER="$proton_path/files/bin/wineserver"
-            export PATH="$proton_path/files/bin:$PATH"
-        fi
-        
-        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d8" /d "native" /f
-        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d9" /d "native" /f
-        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d10" /d "native" /f
-        "$proton_path/files/bin/wine" reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v "d3d11" /d "native" /f
-        
-        "$proton_path/files/bin/wineserver" -k
-        sleep 2
-        
-    ) | zenity --progress --title="Habilitando WineD3D" --text="Configurando..." --pulsate --auto-close
-    
-    zenity --info --text="WineD3D habilitado. Usando renderizado nativo."
+    ) &
 }
 
 # ========== COMPONENTES WINE ==========
@@ -500,6 +444,7 @@ show_diagnostic_menu() {
         "Diagnosticar Renderer" "Analizar componentes DirectX" \
         "Test D3D8" "Probar Direct3D 8 específicamente" \
         "Test D3D9" "Probar Direct3D 9 específicamente" \
+        "Verificar DXVK" "Comprobar instalación de DXVK" \
         "Identificar Warper" "Mostrar información del renderer" \
         --height=400 --width=600)
     
@@ -512,6 +457,7 @@ show_diagnostic_menu() {
         "Diagnosticar Renderer") diagnose_renderer ;;
         "Test D3D8") test_d3d8 ;;
         "Test D3D9") test_d3d9 ;;
+        "Verificar DXVK") verify_dxvk_installation ;;
         "Identificar Warper") identify_warper ;;
     esac
 }
@@ -619,6 +565,173 @@ set_winxp_mode_and_explorer() {
     zenity --info --text="Modo Windows XP configurado y explorer iniciado"
 }
 
+# ========== EJECUTAR CON WARPERS VÍA REEMPLAZO DIRECTO ==========
+run_with_custom_warper() {
+    local warper_dir=$(zenity --file-selection --title="Selecciona Warper Custom" --directory)
+    [ -z "$warper_dir" ] && return
+    
+    # Verificar estructura del warper
+    if [ ! -d "$warper_dir/i386-windows" ] && [ ! -d "$warper_dir/x86_64-windows" ]; then
+        zenity --error --text="El warper debe tener:\n• i386-windows/ (DLLs 32-bit)\n• x86_64-windows/ (DLLs 64-bit)"
+        return 1
+    fi
+    
+    local exe_file=$(zenity --file-selection --title="Selecciona .exe" --file-filter="Ejecutables | *.exe")
+    [ -z "$exe_file" ] && return
+
+    local proton_path="$PROTON_DIR/$version"
+    local wine_lib_dir="$proton_path/files/lib/wine"
+    
+    (
+        echo "10"
+        echo "# Preparando backup de DLLs originales..."
+        
+        # Crear directorio de backup
+        local backup_dir="$STEAM_COMPAT_DATA_PATH/wine_dll_backup_$$"
+        mkdir -p "$backup_dir/i386-windows" "$backup_dir/x86_64-windows"
+        
+        echo "30"
+        echo "# Reemplazando DLLs 64-bit..."
+        
+        # Procesar DLLs 64-bit
+        if [ -d "$warper_dir/x86_64-windows" ]; then
+            for dll in "$warper_dir/x86_64-windows"/*.dll; do
+                local dll_name=$(basename "$dll")
+                local original_dll="$wine_lib_dir/x86_64-windows/$dll_name"
+                local backup_dll="$backup_dir/x86_64-windows/$dll_name"
+                
+                # Hacer backup del original si existe
+                if [ -f "$original_dll" ]; then
+                    cp "$original_dll" "$backup_dll" 2>/dev/null
+                fi
+                
+                # Reemplazar con el warper
+                cp "$dll" "$original_dll" 2>/dev/null
+            done
+        fi
+        
+        echo "60"
+        echo "# Reemplazando DLLs 32-bit..."
+        
+        # Procesar DLLs 32-bit
+        if [ -d "$warper_dir/i386-windows" ]; then
+            for dll in "$warper_dir/i386-windows"/*.dll; do
+                local dll_name=$(basename "$dll")
+                local original_dll="$wine_lib_dir/i386-windows/$dll_name"
+                local backup_dll="$backup_dir/i386-windows/$dll_name"
+                
+                # Hacer backup del original si existe
+                if [ -f "$original_dll" ]; then
+                    cp "$original_dll" "$backup_dll" 2>/dev/null
+                fi
+                
+                # Reemplazar con el warper
+                cp "$dll" "$original_dll" 2>/dev/null
+            done
+        fi
+        
+        echo "90"
+        echo "# Guardando información de restauración..."
+        
+        # Guardar información para restaurar
+        echo "$backup_dir" > "/tmp/proton_warper_restore_$$.txt"
+        echo "$wine_lib_dir" >> "/tmp/proton_warper_restore_$$.txt"
+        
+        echo "100"
+        echo "# Warper instalado. Ejecutando en modo WineD3D..."
+        
+    ) | zenity --progress --title="Instalando Warper" --percentage=0 --auto-close
+    
+    # Ejecutar el juego en modo WineD3D
+    (
+        cd "$(dirname "$exe_file")"
+        log "Ejecutando con warper custom (reemplazo directo): $exe_file"
+        
+        # Forzar WineD3D ya que reemplazamos las DLLs de WineD3D
+        export PROTON_USE_WINED3D=1
+        
+        "$PROTON_DIR/$version/proton" run "$(basename "$exe_file")"
+        exit_code=$?
+        
+        log "Ejecución finalizada. Restaurando DLLs originales..."
+        
+        # RESTAURAR DLLS ORIGINALES
+        local restore_file="/tmp/proton_warper_restore_$$.txt"
+        if [ -f "$restore_file" ]; then
+            local backup_dir=$(head -1 "$restore_file")
+            local wine_lib_dir=$(tail -1 "$restore_file")
+            
+            echo "# Restaurando DLLs originales..." | zenity --progress --pulsate --auto-close --no-cancel &
+            local progress_pid=$!
+            
+            # Restaurar DLLs 64-bit
+            if [ -d "$backup_dir/x86_64-windows" ]; then
+                for dll in "$backup_dir/x86_64-windows"/*.dll; do
+                    local dll_name=$(basename "$dll")
+                    cp "$dll" "$wine_lib_dir/x86_64-windows/$dll_name" 2>/dev/null
+                done
+            fi
+            
+            # Restaurar DLLs 32-bit
+            if [ -d "$backup_dir/i386-windows" ]; then
+                for dll in "$backup_dir/i386-windows"/*.dll; do
+                    local dll_name=$(basename "$dll")
+                    cp "$dll" "$wine_lib_dir/i386-windows/$dll_name" 2>/dev/null
+                done
+            fi
+            
+            # Limpiar
+            rm -rf "$backup_dir"
+            rm -f "$restore_file"
+            
+            kill $progress_pid 2>/dev/null
+        fi
+        
+        # Notificar
+        if [ $exit_code -eq 0 ]; then
+            notify-send "Proton Launcher" "✅ Juego completado. DLLs originales restauradas."
+        else
+            notify-send "Proton Launcher" "⚠️ Juego terminado (código: $exit_code). DLLs originales restauradas."
+        fi
+        
+    ) &
+}
+
+# ========== RESTAURACIÓN MANUAL (por si acaso) ==========
+restore_wine_dlls_manual() {
+    local backup_pattern="$STEAM_COMPAT_DATA_PATH/wine_dll_backup_*"
+    local latest_backup=$(find $backup_pattern -type d 2>/dev/null | sort -r | head -1)
+    
+    if [ -n "$latest_backup" ]; then
+        zenity --question --text="¿Restaurar DLLs de Wine desde backup?\n\nBackup: $(basename "$latest_backup")"
+        
+        if [ $? -eq 0 ]; then
+            local wine_lib_dir="$PROTON_DIR/$version/files/lib/wine"
+            
+            # Restaurar DLLs 64-bit
+            if [ -d "$latest_backup/x86_64-windows" ]; then
+                for dll in "$latest_backup/x86_64-windows"/*.dll; do
+                    local dll_name=$(basename "$dll")
+                    cp "$dll" "$wine_lib_dir/x86_64-windows/$dll_name" 2>/dev/null
+                done
+            fi
+            
+            # Restaurar DLLs 32-bit
+            if [ -d "$latest_backup/i386-windows" ]; then
+                for dll in "$latest_backup/i386-windows"/*.dll; do
+                    local dll_name=$(basename "$dll")
+                    cp "$dll" "$wine_lib_dir/i386-windows/$dll_name" 2>/dev/null
+                done
+            fi
+            
+            rm -rf "$latest_backup"
+            zenity --info --text="DLLs de Wine restauradas correctamente."
+        fi
+    else
+        zenity --info --text="No se encontraron backups de DLLs de Wine."
+    fi
+}
+
 # ========== INICIALIZACIÓN PRINCIPAL ==========
 # Detectar versiones de Proton
 versions=()
@@ -660,13 +773,15 @@ main_action=$(zenity --list \
     --column="Acción Principal" \
     --column="Descripción" \
     "Ejecutar .exe" "Ejecutar archivo ejecutable" \
+    "Ejecutar con WineD3D" "Usar renderizado OpenGL (sin DXVK)" \
+    "Ejecutar con Warper Custom" "Usar implementación custom de Direct3D" \
+    "Warpers Guardados" "Gestionar warpers preconfigurados(ALPHA)" \
     "▶ Diagnóstico" "Herramientas de diagnóstico y tests" \
     "⚙️ Sistema" "Configuración y herramientas del sistema" \
     "📦 Componentes" "Instalar componentes con Winetricks" \
-    "🎮 DXVK" "Gestionar DXVK y renderizado" \
     "🔄 Reset Prefix" "Eliminar y recrear prefix actual" \
     "🔧 Custom Command" "Ejecutar comando personalizado" \
-    --height=450 --width=600)
+    --height=500 --width=600)
 
 [ -z "$main_action" ] && exit 0
 
@@ -689,10 +804,21 @@ case "$main_action" in
         ) &
         ;;
     
+    "Ejecutar con WineD3D")
+        run_exe_with_wined3d
+        ;;
+    
+    "Ejecutar con Warper Custom")
+        run_with_custom_warper
+        ;;
+
+    "Warpers Guardados")
+        manage_saved_warpers
+        ;;
+
     "▶ Diagnóstico") show_diagnostic_menu ;;
     "⚙️ Sistema") show_system_menu ;;
     "📦 Componentes") install_winetricks_component ;;
-    "🎮 DXVK") manage_dxvk ;;
     "🔄 Reset Prefix") reset_prefix ;;
     "🔧 Custom Command")
         cmd=$(zenity --entry --title="Comando Personalizado" --text="Comando:" --entry-text="wineboot")
