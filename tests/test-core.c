@@ -802,6 +802,184 @@ test_run_end_to_end (Fixture *fx)
 }
 
 /* ------------------------------------------------------------------ */
+/* Output supervision must not block the main loop                     */
+/* ------------------------------------------------------------------ */
+
+/* Regression test: g_spawn_async_with_pipes() hands back *blocking*
+ * descriptors. If the runner reads them with a drain loop and never sets
+ * O_NONBLOCK, read() parks inside the watch callback until Proton writes
+ * something again -- which, during a game session, is nothing until the game
+ * exits. The GLib main loop never regains control, so the whole window
+ * freezes for exactly as long as the game runs and recovers when it closes.
+ *
+ * The fixture reproduces that shape: a burst of output while the prefix is
+ * prepared, then silence, then exit. A 50 ms heartbeat on the main loop must
+ * keep firing throughout. */
+
+#define TALKATIVE_LINES 2000
+#define SILENT_MS       1500
+#define HEARTBEAT_MS    50
+
+typedef struct {
+    GMainLoop *loop;
+    gint64     last_us;
+    gint64     worst_gap_us;
+    guint      heartbeats;
+    guint      lines;
+    gboolean   exited;
+} Liveness;
+
+static gboolean
+on_heartbeat (gpointer user_data)
+{
+    Liveness *lv = user_data;
+    gint64    now = g_get_monotonic_time ();
+    gint64    gap = now - lv->last_us;
+
+    if (gap > lv->worst_gap_us)
+        lv->worst_gap_us = gap;
+    lv->last_us = now;
+    lv->heartbeats++;
+
+    if (lv->exited) {
+        g_main_loop_quit (lv->loop);
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void
+on_any_line (const char *line, void *user_data)
+{
+    Liveness *lv = user_data;
+    const char *p;
+
+    /* The callback receives whatever accumulated since the last flush, which
+     * may be a partial line or many of them, so count newlines. */
+    if (line == NULL)
+        return;
+
+    for (p = line; *p != '\0'; p++) {
+        if (*p == '\n')
+            lv->lines++;
+    }
+}
+
+static void
+on_any_exit (gboolean normal, int status, void *user_data)
+{
+    Liveness *lv = user_data;
+
+    lv->exited = TRUE;
+}
+
+/* Safety net so a regression can never hang the suite. */
+static gboolean
+on_watchdog (gpointer user_data)
+{
+    Liveness *lv = user_data;
+
+    g_printerr ("  (watchdog: giving up on the liveness fixture)\n");
+    lv->exited = TRUE;
+    g_main_loop_quit (lv->loop);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+test_run_keeps_main_loop_responsive (Fixture *fx)
+{
+    g_autoptr(PlProtonList) protons = pl_proton_list_new ();
+    g_autoptr(PlRunner)     runner = pl_runner_new ();
+    g_autoptr(GError)       error = NULL;
+    g_autofree char        *build_dir = NULL;
+    g_autofree char        *body = NULL;
+    const PlProton        *proton;
+    PlRunRequest           req = { 0 };
+    Liveness               lv = { 0 };
+    gboolean               started;
+    PlPrefix              *prefix;
+
+    section ("output supervision does not block the main loop");
+
+    /* A build that talks, then goes quiet, then exits. */
+    build_dir = g_build_filename (fx->proton_dir, "GE-ProtonChatty", NULL);
+    g_assert_cmpint (g_mkdir_with_parents (build_dir, 0755), ==, 0);
+    write_file (build_dir, "version", "GE-ProtonChatty\n", FALSE);
+
+    body = g_strdup_printf (
+        "#!/bin/sh\n"
+        "i=0\n"
+        "while [ $i -lt %d ]; do\n"
+        "  echo \"info: wineserver: diagnostic line $i\"\n"
+        "  i=$((i+1))\n"
+        "done\n"
+        "sleep %d\n",       /* silence for the whole "game session" */
+        TALKATIVE_LINES, SILENT_MS / 1000);
+    write_file (build_dir, "proton", body, TRUE);
+
+    pl_proton_scan (protons, fx->proton_dir, &error);
+    g_assert_no_error (error);
+    proton = pl_proton_find (protons, "GE-ProtonChatty");
+    g_assert_nonnull (proton);
+
+    req.verb   = PL_VERB_RUN;
+    req.proton = proton;
+    req.exe    = "/games/doom/Doom.exe";
+    req.game_id = "umu-default";
+
+    g_assert_true (pl_prefix_create (fx->prefix_root, "liveness", &error));
+    g_assert_no_error (error);
+
+    /* Built by hand, as in test_run_end_to_end, so it outlives this scope. */
+    prefix = g_new0 (PlPrefix, 1);
+    prefix->id   = g_strdup ("liveness");
+    prefix->path = g_build_filename (fx->prefix_root, "liveness", NULL);
+    prefix->pfx  = g_build_filename (prefix->path, "pfx", NULL);
+    req.prefix = prefix;
+
+    lv.loop    = g_main_loop_new (NULL, FALSE);
+    lv.last_us = g_get_monotonic_time ();
+
+    g_timeout_add (HEARTBEAT_MS, on_heartbeat, &lv);
+
+    started = pl_run_start (runner, &req, fx->root, FALSE,
+                            on_any_line, on_any_exit, &lv, &error);
+    CHECK (started, "could not start the chatty fixture: %s",
+           error ? error->message : "");
+    g_clear_error (&error);
+
+    if (started) {
+        /* Never let a regression hang the suite: bail out well past the
+         * fixture's own runtime. */
+        g_timeout_add_seconds (SILENT_MS / 1000 + 20, on_watchdog, &lv);
+        g_main_loop_run (lv.loop);
+    }
+
+    /* The child must have finished its silent stretch before we get here,
+     * otherwise the assertions below would be measuring the wrong thing. */
+    CHECK (lv.exited, "the child process was never reaped");
+    CHECK (lv.worst_gap_us < (gint64) SILENT_MS * 1000 / 4,
+           "the main loop was starved for %.0f ms; output supervision must "
+           "not block it while Proton is silent",
+           lv.worst_gap_us / 1000.0);
+    CHECK (lv.heartbeats >= (unsigned) (SILENT_MS / HEARTBEAT_MS) / 2,
+           "only %u heartbeats fired in %d ms of silence; the loop was stuck",
+           lv.heartbeats, SILENT_MS);
+
+    /* Bounding the reads per callback must not drop output. */
+    CHECK (lv.lines == TALKATIVE_LINES,
+           "expected %d lines, got %u: capping reads per callback lost output",
+           TALKATIVE_LINES, lv.lines);
+
+    g_main_loop_unref (lv.loop);
+
+    g_free (prefix->id);
+    g_free (prefix->path);
+    g_free (prefix->pfx);
+    g_free (prefix);
+}
+
+/* ------------------------------------------------------------------ */
 /* Preflight                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -1085,6 +1263,7 @@ main (int argc, char **argv)
     test_run_argv (&fx);
     test_run_envp (&fx);
     test_run_end_to_end (&fx);
+    test_run_keeps_main_loop_responsive (&fx);
     test_preflight (&fx);
     test_umu_detection (&fx);
     test_config_roundtrip ();

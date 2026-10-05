@@ -22,6 +22,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/wait.h>
 
@@ -224,6 +225,34 @@ emit_pending (PlRunner *self)
     g_free (chunk);
 }
 
+/* Upper bound on reads per callback. Keeps a noisy Proton from holding the
+ * main loop while it drains a large backlog; the watch is level-triggered, so
+ * whatever is left is picked up on the next dispatch. */
+#define PL_READ_CHUNKS_PER_CALLBACK 16
+
+/* Read a pipe to exhaustion. Safe because the fd is non-blocking: this
+ * terminates on G_IO_STATUS_AGAIN or EOF instead of waiting for the writer.
+ *
+ * Needed because on_channel_ready() caps how much it reads per dispatch, so
+ * data can still be sitting in the pipe when it stops. */
+static void
+pl_channel_drain (GIOChannel *channel, PlRunner *self)
+{
+    char      buf[4096];
+    gsize     bytes_read = 0;
+    GIOStatus status;
+
+    if (channel == NULL)
+        return;
+
+    do {
+        status = g_io_channel_read_chars (channel, buf, sizeof (buf),
+                                          &bytes_read, NULL);
+        if (bytes_read > 0 && self->pending != NULL)
+            g_string_append_len (self->pending, buf, (gssize) bytes_read);
+    } while (status == G_IO_STATUS_NORMAL && bytes_read > 0);
+}
+
 static gboolean
 on_channel_ready (GIOChannel   *source,
                   GIOCondition  condition,
@@ -233,24 +262,87 @@ on_channel_ready (GIOChannel   *source,
     char      buf[4096];
     gsize     bytes_read = 0;
     GIOStatus status;
+    int       chunks = 0;
 
     if (self->pending == NULL)
         self->pending = g_string_new (NULL);
 
+    /* The fd is non-blocking (see pl_channel_watch), so this loop always
+     * terminates on G_IO_STATUS_AGAIN once the pipe runs dry instead of
+     * parking the main loop inside read() until the child writes again. */
     do {
         status = g_io_channel_read_chars (source, buf, sizeof (buf),
                                           &bytes_read, NULL);
         if (bytes_read > 0)
             g_string_append_len (self->pending, buf, (gssize) bytes_read);
-    } while (status == G_IO_STATUS_NORMAL && bytes_read > 0);
+        chunks++;
+    } while (status == G_IO_STATUS_NORMAL && bytes_read > 0 &&
+             chunks < PL_READ_CHUNKS_PER_CALLBACK);
+
+    if (condition & (G_IO_HUP | G_IO_ERR)) {
+        /* All writers are gone, so the tail of the output is still readable
+         * but will never trigger another G_IO_IN. Take it now. */
+        pl_channel_drain (source, self);
+    }
 
     emit_pending (self);
 
     if (condition & (G_IO_HUP | G_IO_ERR)) {
+        /* Hand the channel back to whoever owns it and clear the stored id:
+         * returning G_SOURCE_REMOVE destroys the source, so on_child_exit()
+         * must not try to remove it again. Match on the channel, since this
+         * callback serves both pipes. */
+        if (source == self->out_ch) {
+            self->watch_stdout = 0;
+            self->out_ch = NULL;
+        } else if (source == self->err_ch) {
+            self->watch_stderr = 0;
+            self->err_ch = NULL;
+        }
+
         g_io_channel_shutdown (source, FALSE, NULL);
+        g_io_channel_unref (source);   /* close_on_unref closes the fd */
         return G_SOURCE_REMOVE;
     }
     return G_SOURCE_CONTINUE;
+}
+
+/* Wrap one pipe end in a GIOChannel and start watching it.
+ *
+ * g_spawn_async_with_pipes() hands back *blocking* descriptors, and
+ * g_io_channel_unix_new() does not change that. With a blocking fd the read
+ * loop above would sit inside read() for as long as Proton has nothing to say
+ * -- which is the whole game session -- holding the GTK main loop and
+ * freezing the window until the child exits. Setting O_NONBLOCK makes the read
+ * return G_IO_STATUS_AGAIN instead, so the watch releases the main loop
+ * immediately and the UI stays responsive while the game runs.
+ */
+static guint
+pl_channel_watch (gint          fd,
+                  GIOChannel  **channel_out,
+                  PlRunner     *self)
+{
+    GIOChannel *channel;
+    int         flags;
+
+    *channel_out = NULL;
+
+    if (fd < 0)
+        return 0;
+
+    flags = fcntl (fd, F_GETFL, 0);
+    if (flags != -1)
+        (void) fcntl (fd, F_SETFL, flags | O_NONBLOCK);
+
+    channel = g_io_channel_unix_new (fd);
+    g_io_channel_set_encoding (channel, NULL, NULL);
+    g_io_channel_set_buffered (channel, FALSE);
+    g_io_channel_set_close_on_unref (channel, TRUE);
+
+    *channel_out = channel;
+
+    return g_io_add_watch (channel, G_IO_IN | G_IO_HUP | G_IO_ERR,
+                           on_channel_ready, self);
 }
 
 static void
@@ -262,9 +354,11 @@ on_child_exit (GPid  pid,
 
     g_spawn_close_pid (pid);
 
-    /* Drain whatever the pipes still hold before reporting the exit. */
-    if (self->pending != NULL && self->pending->len > 0)
-        emit_pending (self);
+    /* Take whatever the pipes still hold before tearing the watches down,
+     * then flush it, so no output is lost on the last burst. */
+    pl_channel_drain (self->out_ch, self);
+    pl_channel_drain (self->err_ch, self);
+    emit_pending (self);
 
     if (self->watch_stdout != 0) {
         g_source_remove (self->watch_stdout);
@@ -350,22 +444,8 @@ pl_run_start (PlRunner           *self,
     self->pid     = pid;
     self->running = TRUE;
 
-    if (out_fd >= 0) {
-        self->out_ch = g_io_channel_unix_new (out_fd);
-        g_io_channel_set_encoding (self->out_ch, NULL, NULL);
-        g_io_channel_set_buffered (self->out_ch, FALSE);
-        g_io_channel_set_close_on_unref (self->out_ch, TRUE);
-        self->watch_stdout = g_io_add_watch (self->out_ch, G_IO_IN | G_IO_HUP | G_IO_ERR,
-                                             on_channel_ready, self);
-    }
-    if (err_fd >= 0) {
-        self->err_ch = g_io_channel_unix_new (err_fd);
-        g_io_channel_set_encoding (self->err_ch, NULL, NULL);
-        g_io_channel_set_buffered (self->err_ch, FALSE);
-        g_io_channel_set_close_on_unref (self->err_ch, TRUE);
-        self->watch_stderr = g_io_add_watch (self->err_ch, G_IO_IN | G_IO_HUP | G_IO_ERR,
-                                             on_channel_ready, self);
-    }
+    self->watch_stdout = pl_channel_watch (out_fd, &self->out_ch, self);
+    self->watch_stderr = pl_channel_watch (err_fd, &self->err_ch, self);
 
     self->watch_child = g_child_watch_add (pid, on_child_exit, self);
 
