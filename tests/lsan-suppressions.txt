@@ -1,0 +1,9 @@
+# LSan suppressions for the GTK smoke test.
+#
+# Every GTK process pulls in fontconfig, which caches font metadata in
+# process-lifetime globals and never frees them. Those allocations are not
+# ours and cannot be released, so they would otherwise drown out real leaks
+# from the launcher itself.
+leak:libfontconfig
+leak:FcLangSetCopy
+leak:FcValueSave

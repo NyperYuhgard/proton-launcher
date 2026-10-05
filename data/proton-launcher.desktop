@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Proton Launcher
+GenericName=Proton Game Launcher
+Comment=Run Proton builds and Windows games on Linux without Steam
+Exec=proton-launcher %f
+Icon=proton-launcher
+Terminal=false
+Categories=Game;Utility;
+Keywords=Proton;Wine;GE-Proton;games;Windows;
+MimeType=application/x-ms-dos-executable;
+StartupNotify=true

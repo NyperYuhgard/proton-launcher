@@ -1,0 +1,15 @@
+# Build artifacts
+/build/
+/dist/
+*.o
+*.d
+
+# AppImage tooling, fetched by packaging/build-appimage.sh
+/packaging/.tools/
+
+# "appimagetool AppDir" leaves this behind; inspect an image with
+# "./Some.AppImage --appimage-extract" and it appears here.
+/squashfs-root/
+
+# Locally built AppImages
+/*AppImage

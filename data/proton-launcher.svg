@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128"
+     viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#37474f"/>
+      <stop offset="1" stop-color="#1c262b"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#ff8a65" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#ffd54f" stop-opacity="0.15"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="4" y="4" width="120" height="120" rx="24" fill="url(#bg)"/>
+
+  <!-- Proton beam cone -->
+  <polygon points="24,110 34,58 60,58" fill="url(#beam)"/>
+
+  <!-- Emitter housing -->
+  <rect x="44" y="34" width="48" height="26" rx="6" fill="#546e7a"/>
+  <rect x="44" y="52" width="48" height="8" rx="4" fill="#263238"/>
+  <circle cx="68" cy="45" r="6" fill="#4fc3f7"/>
+
+  <!-- Proton particle heading into the beam -->
+  <circle cx="66" cy="76" r="7" fill="#fff3e0"/>
+  <circle cx="66" cy="76" r="3" fill="#4fc3f7"/>
+
+  <!-- Wine glass -->
+  <g fill="none" stroke="#eceff1" stroke-width="5"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 40 92 L 52 92 L 49 112 L 43 112 Z"/>
+    <path d="M 52 98 L 66 98"/>
+    <path d="M 59 98 L 59 118"/>
+    <path d="M 50 118 L 68 118"/>
+  </g>
+</svg>
