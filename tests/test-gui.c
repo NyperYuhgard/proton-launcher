@@ -190,6 +190,101 @@ count_dialogs (const char *title)
     return n;
 }
 
+/* The GtkMenu attached to the "Wine tools" menu button, or NULL. */
+static GtkMenu *
+find_tools_menu (GtkWidget *widget)
+{
+    if (GTK_IS_MENU_BUTTON (widget)) {
+        if (g_strcmp0 (gtk_button_get_label (GTK_BUTTON (widget)),
+                       "Wine tools") == 0)
+            return gtk_menu_button_get_popup (GTK_MENU_BUTTON (widget));
+    }
+
+    if (GTK_IS_CONTAINER (widget)) {
+        GList   *children = gtk_container_get_children (GTK_CONTAINER (widget));
+        GList   *it;
+        GtkMenu *found = NULL;
+
+        for (it = children; it != NULL && found == NULL; it = it->next)
+            found = find_tools_menu (it->data);
+
+        g_list_free (children);
+        return found;
+    }
+
+    return NULL;
+}
+
+/* Assert that the Wine tools menu is populated and that every expected tool
+ * is reachable by id. The menu is built from a table, so a bad entry would
+ * otherwise only show up as a menu item that does nothing. */
+static void
+check_tools_menu (GtkWidget *root)
+{
+    static const char *expected[] = {
+        "winecfg", "regedit", "control",
+        "taskmgr", "msinfo32",
+        "explorer", "winefile", "notepad", "cmd",
+        "msiexec", "uninstaller",
+        "wineboot-init", "wineboot-update",
+        NULL
+    };
+    GtkMenu   *menu = find_tools_menu (root);
+    GList     *children;
+    GList     *it;
+    guint      n_items = 0;
+    guint      n_seps  = 0;
+
+    CHECK (menu != NULL, "the Wine tools menu exists");
+
+    if (menu == NULL)
+        return;
+
+    children = gtk_container_get_children (GTK_CONTAINER (menu));
+
+    for (it = children; it != NULL; it = it->next) {
+        GtkWidget *child = it->data;
+
+        if (GTK_IS_SEPARATOR_MENU_ITEM (child)) {
+            n_seps++;
+            continue;
+        }
+
+        if (!GTK_IS_MENU_ITEM (child))
+            continue;
+
+        n_items++;
+        CHECK (g_object_get_data (G_OBJECT (child), "tool-id") != NULL,
+               "every Wine tool entry carries a tool id");
+        CHECK (gtk_menu_item_get_label (GTK_MENU_ITEM (child)) != NULL,
+               "every Wine tool entry carries a label");
+    }
+
+    CHECK (n_items == G_N_ELEMENTS (expected) - 1,
+           "the menu has %u entries, expected %u", n_items,
+           (guint) G_N_ELEMENTS (expected) - 1);
+    CHECK (n_seps > 0, "the menu groups its entries with separators");
+
+    for (gsize i = 0; expected[i] != NULL; i++) {
+        gboolean found = FALSE;
+
+        for (it = children; it != NULL; it = it->next) {
+            GtkWidget *child = it->data;
+
+            if (GTK_IS_MENU_ITEM (child) &&
+                g_strcmp0 (g_object_get_data (G_OBJECT (child), "tool-id"),
+                           expected[i]) == 0) {
+                found = TRUE;
+                break;
+            }
+        }
+
+        CHECK (found, "the menu offers '%s'", expected[i]);
+    }
+
+    g_list_free (children);
+}
+
 /* ------------------------------------------------------------------ */
 /* The scenario                                                       */
 /* ------------------------------------------------------------------ */
@@ -224,6 +319,8 @@ advance (gpointer user_data)
     switch (sc->step) {
     case 0: {
         GtkWidget *button = find_widget (root, is_button_named);
+
+        check_tools_menu (root);
 
         n_checks++;
         if (button == NULL) {

@@ -333,6 +333,71 @@ on_run_clicked (GtkButton *button, gpointer user_data)
     g_free (exe_abs);
 }
 
+/* ------------------------------------------------------------------ */
+/* Wine tools                                                          */
+/* ------------------------------------------------------------------ */
+
+/* One entry in the Wine tools menu.
+ *
+ * `argv` is what `proton runinprefix` receives, so every program name here is
+ * the one Windows resolves inside the prefix. These are Wine builtins shipped
+ * in <prefix>/pfx/drive_c/windows/system32, except regedit.exe, which lives in
+ * windows/ rather than system32/. Names were resolved with
+ * `proton runinprefix cmd /c where ...` against a real GE-Proton prefix, and
+ * each one was then launched to confirm it actually opens a window.
+ *
+ * An entry with a NULL id is a separator.
+ */
+typedef struct {
+    const char *id;
+    const char *label;
+    const char *argv[4];      /* NULL-terminated */
+} WineTool;
+
+static const WineTool wine_tools[] = {
+    { "winecfg",  "Configuration",          { "winecfg", NULL } },
+    { "regedit",  "Registry Editor",        { "regedit", NULL } },
+    { "control",  "Control Panel",          { "control", NULL } },
+
+    { NULL, NULL, { NULL } },
+
+    { "taskmgr",  "Task Manager",           { "taskmgr", NULL } },
+    { "msinfo32", "System Information",     { "msinfo32", NULL } },
+
+    { NULL, NULL, { NULL } },
+
+    { "explorer", "File Explorer",          { "explorer", NULL } },
+    { "winefile", "Wine File Manager",      { "winefile", NULL } },
+    { "notepad",  "Notepad",                { "notepad", NULL } },
+    /* A bare `cmd` is interactive and the launcher has no terminal to give
+     * it, so it would read EOF and exit at once; wineconsole opens a window
+     * instead. */
+    { "cmd",      "Command Prompt",         { "wineconsole", "cmd", NULL } },
+
+    { NULL, NULL, { NULL } },
+
+    { "msiexec",    "Windows Installer",    { "msiexec", NULL } },
+    { "uninstaller", "Add/Remove Programs",  { "uninstaller", NULL } },
+
+    { NULL, NULL, { NULL } },
+
+    { "wineboot-init",   "Initialize prefix", { "wineboot", "--init", NULL } },
+    { "wineboot-update", "Update prefix",    { "wineboot", "-u", NULL } },
+};
+
+static const WineTool *
+wine_tool_find (const char *id)
+{
+    if (id == NULL)
+        return NULL;
+
+    for (gsize i = 0; i < G_N_ELEMENTS (wine_tools); i++) {
+        if (wine_tools[i].id != NULL && g_strcmp0 (wine_tools[i].id, id) == 0)
+            return &wine_tools[i];
+    }
+    return NULL;
+}
+
 /* Wine utilities must go through `runinprefix`; `run` would try to start
  * them through the game launcher. */
 static void
@@ -372,41 +437,15 @@ run_wine_tool (PlWindow *self, const char *const *tool_argv)
 static void
 on_tool_clicked (GtkWidget *widget, gpointer user_data)
 {
-    PlWindow *self = user_data;
-    char     *id = g_object_get_data (G_OBJECT (widget), "tool-id");
+    PlWindow       *self = user_data;
+    const WineTool *tool;
+    const char     *id = g_object_get_data (G_OBJECT (widget), "tool-id");
 
-    if (g_strcmp0 (id, "winecfg") == 0) {
-        const char *argv[] = { "winecfg", NULL };
-        run_wine_tool (self, argv);
+    tool = wine_tool_find (id);
+    if (tool == NULL)
+        return;
 
-    } else if (g_strcmp0 (id, "regedit") == 0) {
-        const char *argv[] = { "regedit", NULL };
-        run_wine_tool (self, argv);
-
-    } else if (g_strcmp0 (id, "explorer") == 0) {
-        const char *argv[] = { "explorer", NULL };
-        run_wine_tool (self, argv);
-
-    } else if (g_strcmp0 (id, "taskmgr") == 0) {
-        const char *argv[] = { "taskmgr", NULL };
-        run_wine_tool (self, argv);
-
-    } else if (g_strcmp0 (id, "notepad") == 0) {
-        const char *argv[] = { "notepad", NULL };
-        run_wine_tool (self, argv);
-
-    } else if (g_strcmp0 (id, "cmd") == 0) {
-        const char *argv[] = { "cmd", NULL };
-        run_wine_tool (self, argv);
-
-    } else if (g_strcmp0 (id, "control") == 0) {
-        const char *argv[] = { "control", NULL };
-        run_wine_tool (self, argv);
-
-    } else if (g_strcmp0 (id, "wineboot-update") == 0) {
-        const char *argv[] = { "wineboot", "-u", NULL };
-        run_wine_tool (self, argv);
-    }
+    run_wine_tool (self, tool->argv);
 }
 
 static void
@@ -1115,24 +1154,16 @@ build_ui (PlWindow *self)
         gtk_menu_button_set_popup (GTK_MENU_BUTTON (button),
                                    GTK_WIDGET (self->tools_menu));
 
-        make_menu_item (self->tools_menu, "Configuration", "winecfg",
-                        G_CALLBACK (on_tool_clicked), self);
-        make_menu_item (self->tools_menu, "Registry Editor", "regedit",
-                        G_CALLBACK (on_tool_clicked), self);
-        make_menu_item (self->tools_menu, "File Explorer", "explorer",
-                        G_CALLBACK (on_tool_clicked), self);
-        make_menu_item (self->tools_menu, "Task Manager", "taskmgr",
-                        G_CALLBACK (on_tool_clicked), self);
-        gtk_menu_shell_append (GTK_MENU_SHELL (self->tools_menu),
-                               gtk_separator_menu_item_new ());
-        make_menu_item (self->tools_menu, "Control Panel", "control",
-                        G_CALLBACK (on_tool_clicked), self);
-        make_menu_item (self->tools_menu, "Command Prompt", "cmd",
-                        G_CALLBACK (on_tool_clicked), self);
-        make_menu_item (self->tools_menu, "Notepad", "notepad",
-                        G_CALLBACK (on_tool_clicked), self);
-        make_menu_item (self->tools_menu, "Update prefix (wineboot -u)",
-                        "wineboot-update", G_CALLBACK (on_tool_clicked), self);
+        for (gsize i = 0; i < G_N_ELEMENTS (wine_tools); i++) {
+            const WineTool *tool = &wine_tools[i];
+
+            if (tool->id == NULL)
+                gtk_menu_shell_append (GTK_MENU_SHELL (self->tools_menu),
+                                       gtk_separator_menu_item_new ());
+            else
+                make_menu_item (self->tools_menu, tool->label, tool->id,
+                                G_CALLBACK (on_tool_clicked), self);
+        }
 
         self->tools_button = button;
         gtk_box_pack_start (GTK_BOX (run_bar), button, FALSE, FALSE, 0);
