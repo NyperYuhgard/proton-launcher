@@ -19,7 +19,6 @@ ARCH="$(uname -m)"
 LIBDIR="$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)"
 TOOLS="packaging/.tools"
 APP_NAME="proton-launcher"
-APP_DIR="dist/AppDir"
 OUT_DIR="dist"
 
 # Only x86_64 is built here. AppImageKit 13 dropped the current asset name in
@@ -89,7 +88,18 @@ make CFLAGS="-O2 -g" >/dev/null
 # ------------------------------------------------------------------ #
 
 say "assembling AppDir"
-rm -rf "$APP_DIR"
+
+# The AppDir is scratch space, removed on exit. It is assembled in a
+# temporary directory on a native filesystem rather than in the project
+# tree: the tree may sit on an NTFS mount, whose ntfs3 driver stamps
+# $LXUID/$LXGID/$LXMOD onto every file it creates so that uid, gid and
+# mode survive on a filesystem with no Unix ownership. SquashFS knows only
+# the user./group./security./trusted. prefixes, so mksquashfs prints one
+# "Unrecognised xattr prefix" line per file per attribute and drops them.
+# Native filesystems never carry those, so packaging stays quiet.
+APP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/${APP_NAME}-AppDir.XXXXXX")"
+trap 'rm -rf "$APP_DIR"' EXIT
+
 mkdir -p "$APP_DIR/usr/bin" "$APP_DIR/usr/share/applications" \
          "$APP_DIR/usr/share/icons/hicolor/scalable/apps"
 
@@ -109,6 +119,11 @@ install -m 0755 packaging/AppRun "$APP_DIR/AppRun"
 # linuxdeploy copies the GTK3 stack and rewrites rpaths to $ORIGIN. The
 # gtk plugin (gdk-pixbuf loaders, hicolor icons) has no published releases
 # anymore, so those two pieces are wired up by hand below.
+#
+# No --output is requested: linuxdeploy only has to populate the AppDir.
+# Asking for its "appimage" output would build a second image in the source
+# tree, taken before the gdk-pixbuf loaders exist below, that nothing ever
+# uses -- and it doubles the mksquashfs pass, hence the noise it prints.
 say "bundling libraries with linuxdeploy (this takes a minute)"
 "$TOOLS/linuxdeploy" \
     --appdir "$APP_DIR" \
@@ -116,7 +131,6 @@ say "bundling libraries with linuxdeploy (this takes a minute)"
     --desktop-file="$APP_DIR/usr/share/applications/$APP_NAME.desktop" \
     --icon-file="$APP_DIR/usr/share/icons/hicolor/scalable/apps/$APP_NAME.svg" \
     --custom-apprun=packaging/AppRun \
-    --output appimage \
     >/dev/null
 
 # gdk-pixbuf resolves its loader modules at runtime. Without them the AppImage
