@@ -190,29 +190,39 @@ count_dialogs (const char *title)
     return n;
 }
 
-/* The GtkMenu attached to the "Wine tools" menu button, or NULL. */
-static GtkMenu *
-find_tools_menu (GtkWidget *widget)
+/* The "Wine tools" menu button, or NULL. */
+static GtkWidget *
+find_tools_button (GtkWidget *widget)
 {
     if (GTK_IS_MENU_BUTTON (widget)) {
         if (g_strcmp0 (gtk_button_get_label (GTK_BUTTON (widget)),
                        "Wine tools") == 0)
-            return gtk_menu_button_get_popup (GTK_MENU_BUTTON (widget));
+            return widget;
     }
 
     if (GTK_IS_CONTAINER (widget)) {
-        GList   *children = gtk_container_get_children (GTK_CONTAINER (widget));
-        GList   *it;
-        GtkMenu *found = NULL;
+        GList     *children = gtk_container_get_children (GTK_CONTAINER (widget));
+        GList     *it;
+        GtkWidget *found = NULL;
 
         for (it = children; it != NULL && found == NULL; it = it->next)
-            found = find_tools_menu (it->data);
+            found = find_tools_button (it->data);
 
         g_list_free (children);
         return found;
     }
 
     return NULL;
+}
+
+/* The GtkMenu attached to the "Wine tools" menu button, or NULL. */
+static GtkMenu *
+find_tools_menu (GtkWidget *widget)
+{
+    GtkWidget *button = find_tools_button (widget);
+
+    return button != NULL ? gtk_menu_button_get_popup (GTK_MENU_BUTTON (button))
+                          : NULL;
 }
 
 /* Assert that the Wine tools menu is populated and that every expected tool
@@ -283,6 +293,50 @@ check_tools_menu (GtkWidget *root)
     }
 
     g_list_free (children);
+
+    /* The attached menu is not one of the button's container children, so
+     * gtk_widget_show_all() on the window never reaches it. If the items are
+     * left hidden the menu reports a natural size of 0x0 and clicking the
+     * button pops up nothing at all -- which looks exactly like a button that
+     * has no options. So require every entry to actually be visible. */
+    children = gtk_container_get_children (GTK_CONTAINER (menu));
+
+    for (it = children; it != NULL; it = it->next) {
+        if (!GTK_IS_MENU_ITEM (it->data))
+            continue;
+
+        CHECK (gtk_widget_get_visible (it->data),
+               "entry '%s' is visible, not just present",
+               g_object_get_data (G_OBJECT (it->data), "tool-id"));
+    }
+
+    g_list_free (children);
+
+    /* End to end: pop the menu up and require it to occupy a real on-screen
+     * area. A 0x0 popup is the reported bug. */
+    {
+        GtkWidget *button = find_tools_button (root);
+        gint       w = 0, h = 0;
+
+        gtk_menu_popup_at_widget (menu, button, GDK_GRAVITY_SOUTH_WEST,
+                                  GDK_GRAVITY_NORTH_WEST, NULL);
+
+        while (gtk_events_pending ())
+            gtk_main_iteration ();
+
+        w = gtk_widget_get_allocated_width (GTK_WIDGET (menu));
+        h = gtk_widget_get_allocated_height (GTK_WIDGET (menu));
+
+        CHECK (gtk_widget_get_mapped (GTK_WIDGET (menu)),
+               "the Wine tools menu maps when popped up");
+        CHECK (w > 0 && h > 0,
+               "the popped-up menu has a real size (%dx%d)", w, h);
+
+        gtk_menu_popdown (menu);
+
+        while (gtk_events_pending ())
+            gtk_main_iteration ();
+    }
 }
 
 /* ------------------------------------------------------------------ */

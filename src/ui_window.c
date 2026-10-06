@@ -1165,6 +1165,13 @@ build_ui (PlWindow *self)
                                 G_CALLBACK (on_tool_clicked), self);
         }
 
+        /* The attached menu is not one of the button's container children, so
+         * the gtk_widget_show_all() at the end of build_ui() never reaches it.
+         * Left unshown, every item stays hidden, the menu reports a natural
+         * size of 0x0, and clicking the button pops up an invisible nothing.
+         * Show it here instead. */
+        gtk_widget_show_all (GTK_WIDGET (self->tools_menu));
+
         self->tools_button = button;
         gtk_box_pack_start (GTK_BOX (run_bar), button, FALSE, FALSE, 0);
     }
