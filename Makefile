@@ -2,7 +2,9 @@
 #
 # Targets:
 #   make            build build/proton-launcher
-#   make check      build and run the core unit tests
+#   make check      core unit tests, headless
+#   make check-gui  GTK smoke test, skips itself without a display
+#   make check-asan both suites under ASan/UBSan/LSan
 #   make install    install to $(DESTDIR)$(PREFIX)/bin
 #   make run        build and launch
 #   make clean      remove build artifacts
@@ -86,13 +88,41 @@ check-gui: $(GUI_BIN)
 	$(GUI_BIN)
 
 # Same test under ASan/UBSan/LSan, for when memory bugs are the target.
-check-asan: $(GUI_BIN) $(TEST_BIN)
+#
+# The sanitizer build lives in its own directory so it never mixes with the
+# normal objects. That is what lets this target just work: no "make clean"
+# first, no CFLAGS/LDFLAGS on the command line, and no chance of quietly
+# running unsanitized binaries under ASAN_OPTIONS.
+ASAN_DIR    := build-asan
+ASAN_CFLAGS := -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
+ASAN_LDFLAGS:= -fsanitize=address,undefined
+
+ASAN_CORE_OBJS := $(patsubst src/%.c,$(ASAN_DIR)/%.o,$(CORE_SRCS))
+ASAN_UI_OBJS   := $(patsubst src/%.c,$(ASAN_DIR)/%.o,$(UI_SRCS))
+ASAN_TEST_BIN  := $(ASAN_DIR)/test-core
+ASAN_GUI_BIN   := $(ASAN_DIR)/test-gui
+
+$(ASAN_DIR)/%.o: src/%.c
+	@mkdir -p $(ASAN_DIR)
+	$(CC) $(ALL_CFLAGS) $(ASAN_CFLAGS) -c -o $@ $<
+
+$(ASAN_DIR)/%.o: tests/%.c
+	@mkdir -p $(ASAN_DIR)
+	$(CC) $(ALL_CFLAGS) $(ASAN_CFLAGS) -Isrc -c -o $@ $<
+
+$(ASAN_TEST_BIN): $(ASAN_DIR)/test-core.o $(ASAN_CORE_OBJS)
+	$(CC) $(ALL_CFLAGS) $(ASAN_CFLAGS) $(ASAN_LDFLAGS) -o $@ $^ $(ALL_LIBS)
+
+$(ASAN_GUI_BIN): $(ASAN_DIR)/test-gui.o $(ASAN_UI_OBJS) $(ASAN_CORE_OBJS)
+	$(CC) $(ALL_CFLAGS) $(ASAN_CFLAGS) $(ASAN_LDFLAGS) -o $@ $^ $(ALL_LIBS)
+
+check-asan: $(ASAN_TEST_BIN) $(ASAN_GUI_BIN)
 	ASAN_OPTIONS=detect_leaks=1 \
 	LSAN_OPTIONS=suppressions=tests/lsan-suppressions.txt:print_suppressions=0 \
-	$(TEST_BIN)
+	$(ASAN_TEST_BIN)
 	ASAN_OPTIONS=detect_leaks=1 \
 	LSAN_OPTIONS=suppressions=tests/lsan-suppressions.txt:print_suppressions=0 \
-	$(GUI_BIN)
+	$(ASAN_GUI_BIN)
 
 install: $(TARGET)
 	install -Dm755 $(TARGET) $(BINDIR)/$(PACKAGE)
@@ -104,6 +134,7 @@ run: $(TARGET)
 	$(TARGET)
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(ASAN_DIR)
 
 -include $(DEPS)
+-include $(wildcard $(ASAN_DIR)/*.d)

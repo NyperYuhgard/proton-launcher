@@ -13,9 +13,12 @@ umu-launcher, and does not modify anything outside the folders you choose.
   version, so `GE-Proton10-4` sorts above `GE-Proton9-20`.
 - Manages one prefix per game, so installed programs, settings and saves do
   not interfere with each other.
-- Runs a `.exe` with `proton run`, or opens Wine utilities with
-  `proton runinprefix` (winecfg, regedit, explorer, taskmgr, control, cmd,
-  notepad, and `wineboot -u` to update a prefix).
+- Runs a `.exe` with `proton run`, and opens Wine utilities with
+  `proton runinprefix`, grouped into one menu of thirteen entries:
+  **Configuration** (winecfg, regedit, control), **Diagnostics** (taskmgr,
+  msinfo32), **Files** (explorer, winefile, notepad, wineconsole cmd),
+  **Installers** (msiexec, uninstaller) and **Prefix** (initialise it, or
+  update it with `wineboot -u`).
 - Switches between DXVK/vkd3d-Proton and OpenGL wined3d per session.
 - Runs a preflight that reports the dependency problems which otherwise show
   up as a Python traceback in the log.
@@ -64,19 +67,16 @@ The tests assert the exact argv and envp, so if Proton's expectations change,
 make            # build/proton-launcher
 make check      # core unit tests, no display or Proton needed
 make check-gui  # GTK smoke test, skips itself when there is no display
+make check-asan # both suites under ASan/UBSan/LSan
 make install    # to $(PREFIX)/bin, default /usr/local
 make clean
 ```
 
 Dependencies for compiling: `libgtk-3-dev`, `pkg-config`.
 
-To build with sanitizers:
-
-```sh
-make clean
-make CFLAGS="-O1 -g -fsanitize=address,undefined" \
-     LDFLAGS="-fsanitize=address,undefined" check-asan
-```
+`make check-asan` builds into `build-asan/`, kept separate from `build/`, so
+it needs no `make clean` first and no flags on the command line. Tests and
+binaries from the two builds are never mixed.
 
 ## Running
 
@@ -122,11 +122,15 @@ src/pl_proton.c     build discovery and validation
 src/pl_prefix.c     prefix create/scan/remove
 src/pl_preflight.c  dependency checks
 src/pl_config.c     config.ini handling
-src/ui_window.c     main window
+src/ui.h            window interface exposed to main
+src/ui_private.h    window internals shared across the ui_*.c files
+src/ui_window.c     main window, including the Wine tools menu
 src/ui_wizard.c     first-run setup
 src/ui_prefs.c      preferences dialog
 tests/test-core.c   headless unit tests
 tests/test-gui.c    GTK smoke test
+data/               desktop entry and scalable icon
+packaging/          AppRun and the AppImage build script
 ```
 
 The core has no GTK dependency, which is what lets `make check` run headless.

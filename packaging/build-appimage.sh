@@ -42,8 +42,8 @@ die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 command -v pkg-config >/dev/null || die "pkg-config is required"
 pkg-config --exists gtk+-3.0 glib-2.0 gio-2.0 ||
     die "GTK3 development files are missing (install libgtk-3-dev)"
-command -v curl >/dev/null || die "curl is required"
-command -v wget >/dev/null || die "wget is required"
+command -v curl >/dev/null || command -v wget >/dev/null ||
+    die "either curl or wget is required to fetch the tooling"
 
 # ------------------------------------------------------------------ #
 # Fetch the AppImage tooling                                          #
@@ -153,8 +153,6 @@ else
 
     chmod 0644 "$LOADER_CACHE"
 fi
-
-
 
 # ------------------------------------------------------------------ #
 # Turn it into an AppImage                                            #
